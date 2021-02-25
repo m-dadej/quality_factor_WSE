@@ -1,6 +1,6 @@
 ---
 title: "Return based quality factor on Warsaw Stock Exchange"
-subtitle: "Reproduction of Jagannathan & Zhang 2020 paper 'Return Based Measure of Firm Quality "
+subtitle: "Reproduction of Jagannathan & Zhang 2020 paper 'Return Based Measure of Firm Quality'"
 author: "Mateusz Dadej"
 date: "12-1-2021"
 output:
@@ -15,39 +15,63 @@ output:
     code_folding: show
 ---
 
+Recently I ran across an interesting paper published as a working paper of National Bureau of Economic Research called "Return Based Measue of Firm Quality" (you may read it [here](https://www.nber.org/papers/w27859)). Apparently, I had a suitable data and thought why not reproduce it on polish data in the free time. It turned out not so bad and thanks to being not filled with boring mathematic formulae I guess it's also pretty accessible. 
+
+You dont have to read the code. If you are not familiar with R or other programming language you may still read it.
+
+Basically, the quality factor is a general characteristic of firms that are well governed or e.g. have higher profitability. The difference between this factor and a popular value is that quality is not related to the valuation of a particular company, so it does not take into account market cap in its metrics. This factor was well described and analyzed by Clifford S. Asness, Andrea Frazzini & Lasse Heje Pedersen in their paper [Quality minus Junk](https://link.springer.com/article/10.1007/s11142-018-9470-2). It's a very interesting read.
+
+The authors of the paper which we'd like to reproduce try to measure the same factor but without relying on the fundamental data. The author came to the quite interesting way to do so. Basic idea is to:
+
+- Divide stock universum by their sectors and market capitalization.
+- For each sector identify the worst performing month of a given year (stress time).
+- In the next year form a portfolio of the most stress-stable sotcks during stress time within their market cap.
+
+First we have to define some functions, load libraries and import necessary data, which i store on my github. 
+
 ```{r, warning=FALSE, message=FALSE}
 library(tidyverse)
-library(TTR)
 library(magrittr)
 library(purrr)
 library(lubridate)
+library(vroom)
 
-every_df    <- read.csv("data/every_df.csv")[,-1]
-ticker_list <- read.csv("data/ticker_list.csv")[,-1]
-df          <- read.csv("data/sample_df_rets.csv")[,-1]
-df_mc       <- read.csv( "data/df_mc.csv")[,-1]
-benchmark   <- read.csv("data/benchmark.csv")[,-1] %>% mutate(Data = as.Date(Data))
-swig        <- read.csv("data/swig.csv")[,-1] %>% mutate(Data = as.Date(Data))
+# useful functions
+ret <- function(x) (x - lag(x))/ lag(x)
+cum_prod <-  function(x) cumprod(replace(x, is.na(x), 0) + 1)
+
+# importing data (btw there is a huge difference betwen read.csv() and vroom())
+every_df    <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/every_df.csv")[,-1]
+ticker_list <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/ticker_sectors.csv")[,-1]
+df          <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/sample_df_rets.csv")[,-1]
+df_mc       <- vroom( "https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/df_mc.csv")[,-1]
+benchmark   <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/benchmark.csv")[,-1] %>% mutate(Data = as.Date(Data))
+swig        <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/swig.csv")[,-1] %>% mutate(Data = as.Date(Data))
 ```
 
 
+We have data only on 171 tickers, but Sectors available are quite narrow, we have to gather them into only 9, so each sector will have enough stocks for a meaningful analysis. I made these sectors with a thumb-rule but don't worry i was not really doing any data mining here.
+
 ```{r}
-agg_sectors <- list(chem_sur = c("Chemia", "Drewno i papier", "Górnictwo", "Tworzywa i guma",                                       "Hutnictwo", "Recykling"),
-                    dobr_kons = c("Inne dobra konsumpcyjne", "Produkcja żywności", "Motoryzacja",                                    "Odzież i kosmetyki", "Wyposażenie domu"),
-                    finanse = c("Banki", "Finanse pozostałe", "Rynek kapitałowy", "Ubezpieczenia"),
-                    handel_uslugi = c("Handel hurtowy", "Handel internetowy", "Media", "Pozostały handel i usługi", "Rekreacja i wypoczynek", "Sieci handlowe"),
-                    ochrona_zdr = c("Ochrona zdrowia", "Biotechnologia"),
-                    energia = c("Paliwa", "Energia", "Dystrybucja ciepła i wody"),
-                    prod_przem = c("Elektromaszynowy", "Transport", "Usługi dla przedsiębiorstw", "Zaopatrzenie przedsiębiorstw"),
-                    prod_bud = c("Budownictwo", "Nieruchomości"),
+agg_sectors <- list(chem_materials = c("Chemia", "Drewno i papier", "Górnictwo", "Tworzywa i guma", "Hutnictwo", "Recykling"),
+                    consumer_goods = c("Inne dobra konsumpcyjne", "Produkcja żywności", "Motoryzacja", "Odzież i kosmetyki", "Wyposażenie domu"),
+                    finance = c("Banki", "Finanse pozostałe", "Rynek kapitałowy", "Ubezpieczenia"),
+                    trade_services = c("Handel hurtowy", "Handel internetowy", "Media", "Pozostały handel i usługi", "Rekreacja i wypoczynek", "Sieci handlowe"),
+                    healthcare = c("Ochrona zdrowia", "Biotechnologia"),
+                    energy = c("Paliwa", "Energia", "Dystrybucja ciepła i wody"),
+                    industrials = c("Elektromaszynowy", "Transport", "Usługi dla przedsiębiorstw", "Zaopatrzenie przedsiębiorstw"),
+                    construction = c("Budownictwo", "Nieruchomości"),
                     tech = c("Gry video", "Informatyka", "Telekomunikacja", "Nowe technologie"))%>%
                 unlist()%>%
                 as.data.frame() %>%
                 data.frame(sector = gsub('[[:digit:]]+', '',row.names(.)))
 ```
 
+Now that we have the sectors we need to find what is the minimal amount of stocks in a single sector and choose that many random tickers for each of the group.
 
 ```{r}
+
+# what is the minimal number of stocks in a single group?
 n_sample <- ticker_list %>%
   filter(stock_name %in% colnames(every_df)) %>%
   select(agg_sector) %>%
@@ -57,24 +81,96 @@ n_sample <- ticker_list %>%
   .$Freq %>%
   min()
 
-
-invest_tickers <- matrix(ncol = length(unique(agg_sectors$sector)), nrow = n_sample)%>%
-  as.data.frame()%>%
-  set_colnames(unique(agg_sectors$sector))
-
-for (sector in unique(agg_sectors$sector)) {
-  
-  invest_tickers[sector] <-  ticker_list[ticker_list$agg_sector == sector,] %>%
-    arrange(desc(.)) %>%
-    head(n = n_sample) %>%
-    select(ticker) %>%
-    .$ticker
-  
-}
-
-invest_tickers <- unlist(invest_tickers) %>%
-  as.data.frame() %>%
-  data.frame(sector = gsub('[[:digit:]]+', '',row.names(.))) %>%
-  set_colnames(c("ticker", "sector")) %>%
+invest_tickers <- group_by(ticker_list, agg_sector) %>%
+  arrange(desc(`.`)) %>%
+  mutate(nth_ticker = 1:n()) %>%
+  ungroup() %>%
+  drop_na() %>%
+  filter(nth_ticker <= n_sample) %>%
+  select(ticker, "sector" = agg_sector) %>%
   mutate(ticker = tolower(ticker))
+
+```
+
+So the sector with the least number of stocks is energy (unsurprisingly), thus we will randomly choose 19 tickers for each of the sector, so that each will have the same amount.
+
+Next we have to make a sector index returns. For a simplicity each sector index will be an equal weights $1/N$ style portfolio. 
+```{r, message=FALSE}
+
+backtest_t0 <- "2007-01-01"
+
+# sector daily returns
+sector_rets <- filter(df, Data >= backtest_t0) %>%
+                mutate_at(vars(-Data), ret) %>%
+                pivot_longer(cols = -Data) %>%
+                merge(.,rename(invest_tickers, "name" = ticker), by = "name") %>%
+                group_by(Data, sector) %>%
+                summarise(avg_ret = mean(value, na.rm = TRUE)) %>%
+                ungroup() %>%
+                pivot_wider(names_from = sector, values_from = avg_ret) 
+
+
+
+mutate_at(sector_rets, vars(-Data), cum_prod) %>%
+pivot_longer(cols = -Data) %>%
+mutate(Data = ymd(Data)) %>%
+ggplot(aes(x = Data)) +
+  geom_line(aes(y = value, color = name))
+
+```
+
+
+
+```{r}
+
+# stressful times in every year per sector
+stressful_time <- mutate(sector_rets) %>%
+                    mutate(Data = floor_date(as_date(Data), "month")) %>%
+                    pivot_longer(cols = -c(Data)) %>%
+                    group_by(Data,  name) %>%
+                    summarise(month_ret = prod(value + 1, na.rm = TRUE)) %>%
+                    ungroup() %>%
+                    mutate(year_t = year(Data)) %>%
+                    group_by(name, year_t) %>%
+                    summarise(worst_month = min(month_ret, na.rm = TRUE),
+                              which_month = Data[which(month_ret == min(month_ret, na.rm = TRUE))]) %>%
+                    ungroup() %>%
+                    mutate(worst_month = month(which_month))
+
+
+# return of a given stock during stressful time
+stress_stock_rets <- filter(df, Data >= backtest_t0) %>%
+                      mutate_at(vars(-Data), ret) %>%
+                      pivot_longer(cols = -Data) %>%
+                      mutate(Data = floor_date(as_date(Data), "month")) %>%
+                      group_by(name, Data) %>%
+                      summarise(stock_month_ret = prod(value + 1, na.rm = TRUE)) %>%
+                      merge(rename(invest_tickers, "name" = ticker), by = "name", all = TRUE) %>%
+                      mutate(year_t = year(Data)) %>%
+                      merge(select(stressful_time,"sector" = name, worst_month, year_t), 
+                            by = c("sector", "year_t"), all.y = TRUE) %>%
+                      group_by(name, year_t) %>%
+                      summarise(stress_ret = stock_month_ret[which(month(Data) == worst_month)]) %>%
+                      ungroup() %>%
+                      merge(rename(invest_tickers, "name" = ticker), by = "name", all = TRUE) %>%
+                      merge(select(stressful_time,"sector" = name, worst_month, year_t), 
+                            by = c("sector", "year_t"), all.y = TRUE)
+
+
+# size data frame
+mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
+  filter(ymd(Data) < tail(df$Data, n = 1)) %>%
+  mutate(y = year(ymd(Data)),
+         name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+  group_by(y, name) %>%
+  summarise(mean_cap = mean(value, na.rm = TRUE)) %>%
+  ungroup() %>%
+  rename("ticker" = name) %>%
+  merge(invest_tickers, by = "ticker") %>%
+  group_by(y, sector) %>%
+  summarise(median_sector_cap = median(mean_cap, na.rm = TRUE), ticker, mean_cap) %>%
+  ungroup() %>%
+  mutate(size = ifelse(mean_cap > median_sector_cap, "big", "small"))
+
+
 ```

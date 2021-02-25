@@ -15,17 +15,21 @@ library(magrittr)
 library(purrr)
 library(lubridate)
 library(ggplot2)
+library(vroom)
 
+ret <- function(x) (x - lag(x))/ lag(x)
+cum_prod <-  function(x) cumprod(replace(x, is.na(x), 0) + 1)
+  
 data_folder <- "data"
 
 # importing data
-every_df <- read.csv(paste(data_folder,"/", "every_df.csv", sep = ""))[,-1]
-ticker_list <- read.csv(paste(data_folder,"/", "ticker_list.csv", sep = ""))[,-1]
-df <- read.csv(paste(data_folder, "/", "sample_df_rets.csv", sep = ""))[,-1]
-df_mc <- read.csv(paste(data_folder, "/", "df_mc.csv", sep = ""))[,-1]
-benchmark <- read.csv(paste(data_folder, "/", "benchmark.csv", sep = ""))[,-1] %>%
+every_df <- vroom(paste(data_folder,"/", "every_df.csv", sep = ""))[,-1]
+ticker_list <- vroom(paste(data_folder,"/", "ticker_list.csv", sep = ""))[,-1]
+df <- vroom(paste(data_folder, "/", "sample_df_rets.csv", sep = ""))[,-1]
+df_mc <- vroom(paste(data_folder, "/", "df_mc.csv", sep = ""))[,-1]
+benchmark <- vroom(paste(data_folder, "/", "benchmark.csv", sep = ""))[,-1] %>%
   mutate(Data = as.Date(Data))
-swig <- read.csv(paste(data_folder, "/", "swig.csv", sep = ""))[,-1] %>%
+swig <- vroom(paste(data_folder, "/", "swig.csv", sep = ""))[,-1] %>%
   mutate(Data = as.Date(Data))
 
 # making more narrow setor names
@@ -52,31 +56,14 @@ n_sample <- ticker_list %>%
   .$Freq %>%
   min()
 
-
-# empty matrix for sampled tickers
-invest_tickers <- matrix(ncol = length(unique(agg_sectors$sector)), nrow = n_sample)%>%
-  as.data.frame()%>%
-  set_colnames(unique(agg_sectors$sector))
-
-
-for (sector in unique(agg_sectors$sector)) {
-  
-  invest_tickers[sector] <-  ticker_list[ticker_list$agg_sector == sector,] %>%
-    arrange(desc(.)) %>%
-    head(n = n_sample) %>%
-    select(ticker) %>%
-    .$ticker
-  
-}
-
-
-invest_tickers <- unlist(invest_tickers) %>%
-  as.data.frame() %>%
-  data.frame(sector = gsub('[[:digit:]]+', '',row.names(.))) %>%
-  set_colnames(c("ticker", "sector")) %>%
+invest_tickers <- group_by(ticker_list, agg_sector) %>%
+  arrange(desc(`.`)) %>%
+  mutate(nth_ticker = 1:n()) %>%
+  ungroup() %>%
+  drop_na() %>%
+  filter(nth_ticker <= n_sample) %>%
+  select(ticker, "sector" = agg_sector) %>%
   mutate(ticker = tolower(ticker))
-
-
 
 # data wrangling for backtest ##################
 
@@ -84,7 +71,7 @@ backtest_t0 <- "2007-01-01"
 
 # sector daily returns
 sector_rets <- filter(df, Data >= backtest_t0) %>%
-                mutate_at(vars(-Data), function(x){ROC(x, type = "discrete")}) %>%
+                mutate_at(vars(-Data), ret) %>%
                 pivot_longer(cols = -Data) %>%
                 merge(.,rename(invest_tickers, "name" = ticker), by = "name") %>%
                 group_by(Data, sector) %>%
@@ -92,7 +79,7 @@ sector_rets <- filter(df, Data >= backtest_t0) %>%
                 ungroup() %>%
                 pivot_wider(names_from = sector, values_from = avg_ret) 
 
-cum_prod <-  function(x){ cumprod(replace(x, is.na(x), 0) + 1)}
+
 
 mutate_at(sector_rets, vars(-Data), cum_prod) %>%
 pivot_longer(cols = -Data) %>%
@@ -117,7 +104,7 @@ stressful_time <- mutate(sector_rets) %>%
 
 # return of a given stock during stressful time
 stress_stock_rets <- filter(df, Data >= backtest_t0) %>%
-                      mutate_at(vars(-Data), function(x){ROC(x, type = "discrete")}) %>%
+                      mutate_at(vars(-Data), ret) %>%
                       pivot_longer(cols = -Data) %>%
                       mutate(Data = floor_date(as_date(Data), "month")) %>%
                       group_by(name, Data) %>%
@@ -164,7 +151,7 @@ stress_ranks <- rename(mean_mc, "year_t" = y, "name" = ticker) %>%
   
 
 portfolio_SSbigsmall <- filter(df, Data >= backtest_t0) %>%
-  mutate_at(vars(-Data), function(x){ROC(x, type = "discrete")}) %>%
+  mutate_at(vars(-Data), ret) %>%
   pivot_longer(cols = -Data) %>%
   mutate(year_t = year(ymd(Data))) %>%
   merge(select(stress_ranks, year_t, stress_stable, name, size, rel_rank),
@@ -183,9 +170,9 @@ drop_na(portfolio_SSbigsmall) %>%
   ungroup() %>%
   pivot_wider(names_from = class, values_from = cum_ret) %>%
   merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
-  mutate(wig = cumprod(1 + ifelse(is.na(ROC(wig, type = "discrete")), 0, ROC(wig, type = "discrete")))) %>%
+  mutate(wig = cumprod(1 + ifelse(is.na(ret(wig)), 0, ret(wig)))) %>%
   merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
-  mutate(swig = cumprod(1 + ifelse(is.na(ROC(swig, type = "discrete")), 0, ROC(swig, type = "discrete")))) %>%
+  mutate(swig = cumprod(1 + ifelse(is.na(ret(swig)), 0, ret(swig)))) %>%
   pivot_longer(cols = -Data) %>%
 ggplot() +
   geom_line(aes(x = Data, y = value, color = name), size = 1) 
@@ -195,7 +182,7 @@ drop_na(portfolio_SSbigsmall) %>%
   pivot_wider(names_from = class, values_from = portfolio_ret) %>%
   merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
   merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
-  mutate_at(vars(wig, swig), function(x){ROC(x, type = "discrete")}) %>%
+  mutate_at(vars(wig, swig), ret) %>%
   drop_na() %>%
   pivot_longer(cols = -Data) %>%
   group_by(name) %>%
