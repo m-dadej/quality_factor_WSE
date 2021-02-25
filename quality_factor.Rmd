@@ -1,0 +1,80 @@
+---
+title: "Return based quality factor on Warsaw Stock Exchange"
+subtitle: "Reproduction of Jagannathan & Zhang 2020 paper 'Return Based Measure of Firm Quality "
+author: "Mateusz Dadej"
+date: "12-1-2021"
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: show
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(TTR)
+library(magrittr)
+library(purrr)
+library(lubridate)
+
+every_df    <- read.csv("data/every_df.csv")[,-1]
+ticker_list <- read.csv("data/ticker_list.csv")[,-1]
+df          <- read.csv("data/sample_df_rets.csv")[,-1]
+df_mc       <- read.csv( "data/df_mc.csv")[,-1]
+benchmark   <- read.csv("data/benchmark.csv")[,-1] %>% mutate(Data = as.Date(Data))
+swig        <- read.csv("data/swig.csv")[,-1] %>% mutate(Data = as.Date(Data))
+```
+
+
+```{r}
+agg_sectors <- list(chem_sur = c("Chemia", "Drewno i papier", "Górnictwo", "Tworzywa i guma",                                       "Hutnictwo", "Recykling"),
+                    dobr_kons = c("Inne dobra konsumpcyjne", "Produkcja żywności", "Motoryzacja",                                    "Odzież i kosmetyki", "Wyposażenie domu"),
+                    finanse = c("Banki", "Finanse pozostałe", "Rynek kapitałowy", "Ubezpieczenia"),
+                    handel_uslugi = c("Handel hurtowy", "Handel internetowy", "Media", "Pozostały handel i usługi", "Rekreacja i wypoczynek", "Sieci handlowe"),
+                    ochrona_zdr = c("Ochrona zdrowia", "Biotechnologia"),
+                    energia = c("Paliwa", "Energia", "Dystrybucja ciepła i wody"),
+                    prod_przem = c("Elektromaszynowy", "Transport", "Usługi dla przedsiębiorstw", "Zaopatrzenie przedsiębiorstw"),
+                    prod_bud = c("Budownictwo", "Nieruchomości"),
+                    tech = c("Gry video", "Informatyka", "Telekomunikacja", "Nowe technologie"))%>%
+                unlist()%>%
+                as.data.frame() %>%
+                data.frame(sector = gsub('[[:digit:]]+', '',row.names(.)))
+```
+
+
+```{r}
+n_sample <- ticker_list %>%
+  filter(stock_name %in% colnames(every_df)) %>%
+  select(agg_sector) %>%
+  table() %>%
+  as.data.frame() %>%
+  arrange(desc(".")) %>%
+  .$Freq %>%
+  min()
+
+
+invest_tickers <- matrix(ncol = length(unique(agg_sectors$sector)), nrow = n_sample)%>%
+  as.data.frame()%>%
+  set_colnames(unique(agg_sectors$sector))
+
+for (sector in unique(agg_sectors$sector)) {
+  
+  invest_tickers[sector] <-  ticker_list[ticker_list$agg_sector == sector,] %>%
+    arrange(desc(.)) %>%
+    head(n = n_sample) %>%
+    select(ticker) %>%
+    .$ticker
+  
+}
+
+invest_tickers <- unlist(invest_tickers) %>%
+  as.data.frame() %>%
+  data.frame(sector = gsub('[[:digit:]]+', '',row.names(.))) %>%
+  set_colnames(c("ticker", "sector")) %>%
+  mutate(ticker = tolower(ticker))
+```
