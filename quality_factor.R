@@ -1,11 +1,11 @@
 ########### notatki ##############
 # do zrobienia:
-# 1. wprowadz kryterium ¿e spolka wylosowana z danego sektora musi miec minimalna historie kursu.
+# 1. wprowadz kryterium ?e spolka wylosowana z danego sektora musi miec minimalna historie kursu.
 # chyba ze to moze wprowadzic jakis bias do proby. np. Starsze spolki etc?
 # 2. wyeksportuj plik csv ze stopami zwrotu oraz pobierz jeszze raz analogiczne dane o market capie
 
 # przemyslenia:
-# 1. chyba sa spore dysproporcje w sektorach wobec historii kursów ich spolek. Np ochrona zdrowia i gaming
+# 1. chyba sa spore dysproporcje w sektorach wobec historii kurs?w ich spolek. Np ochrona zdrowia i gaming
 
 
 # setup #########
@@ -16,70 +16,49 @@ library(purrr)
 library(lubridate)
 library(ggplot2)
 library(vroom)
+library(hrbrthemes)
 
+# return function
 ret <- function(x) (x - lag(x))/ lag(x)
+# cumulative return function
 cum_prod <-  function(x) cumprod(replace(x, is.na(x), 0) + 1)
+# max drawdown function
+max_dd <- function(r){ max(1 - cumprod(1 + r) / cummax(cumprod(1 + r))) }
+
   
 data_folder <- "data"
 
 # importing data
-every_df <- vroom(paste(data_folder,"/", "every_df.csv", sep = ""))[,-1]
-ticker_list <- vroom(paste(data_folder,"/", "ticker_list.csv", sep = ""))[,-1]
-df <- vroom(paste(data_folder, "/", "sample_df_rets.csv", sep = ""))[,-1]
-df_mc <- vroom(paste(data_folder, "/", "df_mc.csv", sep = ""))[,-1]
+invest_tickers <- vroom(paste(data_folder,"/", "ticker_sectors.csv", sep = ""))[,-1]
+df <- vroom(paste(data_folder, "/", "sample_df_rets.csv", sep = ""))[,-1] %>%
+        arrange(Data) %>%
+        filter(Data <= "2021-01-05")
+df_mc <- vroom(paste(data_folder, "/", "df_mc.csv", sep = ""))[,-1] %>%
+          arrange(Data) %>%
+          filter(Data <= "2021-01-05")
 benchmark <- vroom(paste(data_folder, "/", "benchmark.csv", sep = ""))[,-1] %>%
   mutate(Data = as.Date(Data))
 swig <- vroom(paste(data_folder, "/", "swig.csv", sep = ""))[,-1] %>%
   mutate(Data = as.Date(Data))
 
-# making more narrow setor names
-agg_sectors <- list(chem_sur = c("Chemia", "Drewno i papier", "Górnictwo", "Tworzywa i guma", "Hutnictwo", "Recykling"),
-                    dobr_kons = c("Inne dobra konsumpcyjne", "Produkcja ¿ywno¶ci", "Motoryzacja", "Odzie¿ i kosmetyki", "Wyposa¿enie domu"),
-                    finanse = c("Banki", "Finanse pozosta³e", "Rynek kapita³owy", "Ubezpieczenia"),
-                    handel_uslugi = c("Handel hurtowy", "Handel internetowy", "Media", "Pozosta³y handel i us³ugi", "Rekreacja i wypoczynek", "Sieci handlowe"),
-                    ochrona_zdr = c("Ochrona zdrowia", "Biotechnologia"),
-                    energia = c("Paliwa", "Energia", "Dystrybucja ciep³a i wody"),
-                    prod_przem = c("Elektromaszynowy", "Transport", "Us³ugi dla przedsiêbiorstw", "Zaopatrzenie przedsiêbiorstw"),
-                    prod_bud = c("Budownictwo", "Nieruchomo¶ci"),
-                    tech = c("Gry video", "Informatyka", "Telekomunikacja", "Nowe technologie"))%>%
-  unlist()%>%
-  as.data.frame() %>%
-  data.frame(sector = gsub('[[:digit:]]+', '',row.names(.)))
 
-# what is the minimal number of stocks in a single group?
-n_sample <- ticker_list %>%
-  filter(stock_name %in% colnames(every_df)) %>%
-  select(agg_sector) %>%
-  table() %>%
-  as.data.frame() %>%
-  arrange(desc(".")) %>%
-  .$Freq %>%
-  min()
-
-invest_tickers <- group_by(ticker_list, agg_sector) %>%
-  arrange(desc(`.`)) %>%
-  mutate(nth_ticker = 1:n()) %>%
-  ungroup() %>%
-  drop_na() %>%
-  filter(nth_ticker <= n_sample) %>%
-  select(ticker, "sector" = agg_sector) %>%
-  mutate(ticker = tolower(ticker))
+invest_tickers <- select(invest_tickers, "name" = ticker, "sector" = agg_sector) %>%
+                    mutate(name = tolower(name))
 
 # data wrangling for backtest ##################
 
 backtest_t0 <- "2007-01-01"
 
 # sector daily returns
-sector_rets <- filter(df, Data >= backtest_t0) %>%
+sector_rets <- filter(df, Data >= backtest_t0, Data <= "2021-01-05") %>%
                 mutate_at(vars(-Data), ret) %>%
+                mutate_at(vars(-Data), function(x){replace(x, is.na(x), 0)}) %>%
                 pivot_longer(cols = -Data) %>%
-                merge(.,rename(invest_tickers, "name" = ticker), by = "name") %>%
+                merge(., invest_tickers, by = "name") %>%
                 group_by(Data, sector) %>%
                 summarise(avg_ret = mean(value, na.rm = TRUE)) %>%
                 ungroup() %>%
                 pivot_wider(names_from = sector, values_from = avg_ret) 
-
-
 
 mutate_at(sector_rets, vars(-Data), cum_prod) %>%
 pivot_longer(cols = -Data) %>%
@@ -109,17 +88,87 @@ stress_stock_rets <- filter(df, Data >= backtest_t0) %>%
                       mutate(Data = floor_date(as_date(Data), "month")) %>%
                       group_by(name, Data) %>%
                       summarise(stock_month_ret = prod(value + 1, na.rm = TRUE)) %>%
-                      merge(rename(invest_tickers, "name" = ticker), by = "name", all = TRUE) %>%
+                      ungroup() %>%
+                      mutate(stock_month_ret = ifelse(stock_month_ret == 1, NA, stock_month_ret)) %>%
+                      merge(invest_tickers, by = "name", all = TRUE) %>%
                       mutate(year_t = year(Data)) %>%
                       merge(select(stressful_time,"sector" = name, worst_month, year_t), 
                             by = c("sector", "year_t"), all.y = TRUE) %>%
                       group_by(name, year_t) %>%
                       summarise(stress_ret = stock_month_ret[which(month(Data) == worst_month)]) %>%
                       ungroup() %>%
-                      merge(rename(invest_tickers, "name" = ticker), by = "name", all = TRUE) %>%
+                      merge(invest_tickers, by = "name", all = TRUE) %>%
                       merge(select(stressful_time,"sector" = name, worst_month, year_t), 
                             by = c("sector", "year_t"), all.y = TRUE)
 
+sector_heatmap <- filter(sector_rets[-1,], year(Data) != 2021) %>%
+pivot_longer(cols = -Data) %>%
+  mutate(month_t = month(Data),
+         year_t = year(Data)) %>%
+  group_by(month_t, year_t, name) %>%
+  summarise(ret = prod(value + 1)) %>%
+  ungroup() %>%
+  mutate(ret = ifelse(is.na(ret), 1, ret)) %>%
+  left_join(rename(stressful_time, "month_t" = worst_month),
+            by = c("month_t", "year_t", "name")) %>%
+  mutate(which_month = month(which_month),
+         name = recode(name,
+                       chem_materials = "Chemicals & Basic materials",
+                       construction = "Construction",
+                       consumer_goods = "Consumer goods",
+                       energy = "Energy",
+                       finance = "Finance",
+                       healthcare = "Healthcare",
+                       industrials = "Manufacturing",
+                       tech = "Technology",
+                       trade_services = "Trade & Services"),
+         ret = ret - 1) %>%
+  rename("Return" = ret) %>%
+  ggplot(aes(x = month_t, y = year_t, fill = Return)) +
+  geom_tile() +
+  geom_rect(aes(xmin = which_month - 0.5, 
+                xmax = which_month + 0.5, 
+                ymin = year_t - 0.5, 
+                ymax = year_t + 0.5), size=1, fill=NA, colour="black") +
+  facet_wrap(~name) +
+  scale_x_continuous(breaks = seq(2,12,2), labels = function(x){month.abb[x]}) +
+  scale_y_continuous(breaks = seq(2008, 2020, 2)) +
+  labs(title = "Monthly returns and stressful times of each sector",
+       x = "month", y = "year") +
+  theme_minimal() +
+  theme(strip.background = element_rect(colour="white")) +
+  scale_fill_viridis_c(option = "B",labels = scales::percent)
+
+mc_sd_plot <- pivot_longer(df_mc, cols = -Data) %>%
+  rename("ret" = value) %>%
+  mutate(name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+  full_join(pivot_longer(df, cols = -Data), by  = c("name", "Data")) %>%
+  filter(year(Data) >= 2010) %>%
+  group_by(name) %>%
+  mutate(ret = ROC(ret, type = "discrete")) %>%
+  summarise(median_mc = median(value, na.rm = TRUE),
+            std_dev = sd(ret, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(std_dev < 0.4, 
+         median_mc < 4000) %>%
+  ggplot(aes(x = median_mc, y = std_dev)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() + 
+  geom_smooth(method = "lm")
+
+market_cap_sd_model <- pivot_longer(df_mc, cols = -Data) %>%
+  rename("ret" = value) %>%
+  mutate(name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+  full_join(pivot_longer(df, cols = -Data), by  = c("name", "Data")) %>%
+  filter(year(Data) >= 2010) %>%
+  group_by(name) %>%
+  mutate(ret = ROC(ret, type = "discrete")) %>%
+  summarise(median_mc = median(value, na.rm = TRUE),
+            std_dev = sd(ret, na.rm = TRUE)) %>%
+  ungroup() %>%
+  lm(log10(std_dev) ~ log10(median_mc), data = .) %>%
+  summary()
 
 # size data frame
 mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
@@ -130,7 +179,7 @@ mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
   summarise(mean_cap = mean(value, na.rm = TRUE)) %>%
   ungroup() %>%
   rename("ticker" = name) %>%
-  merge(invest_tickers, by = "ticker") %>%
+  merge(rename(invest_tickers, "ticker" = name), by = "ticker") %>%
   group_by(y, sector) %>%
   summarise(median_sector_cap = median(mean_cap, na.rm = TRUE), ticker, mean_cap) %>%
   ungroup() %>%
@@ -142,11 +191,12 @@ mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
 stress_ranks <- rename(mean_mc, "year_t" = y, "name" = ticker) %>%
                   merge(stress_stock_rets, by  = c("name", "year_t", "sector")) %>%
                   group_by(year_t, sector, size) %>%
-                  summarise(rank = rank(stress_ret, na.last = NA),
+                  summarise(rank = rank(stress_ret, na.last = "keep"),
                               n_stocks = sum(!is.na(size)),name, stress_ret) %>%
                   ungroup() %>%
                   mutate(rel_rank = rank/n_stocks,
-                         stress_stable = ifelse(rel_rank > 0.5, 1,0),
+                         stress_stable = case_when(rel_rank >   0.5 ~ 1,
+                                                   rel_rank <= 0.5 ~ 0),
                          year_t = year_t - 1) 
   
 
@@ -158,10 +208,18 @@ portfolio_SSbigsmall <- filter(df, Data >= backtest_t0) %>%
         by  = c("year_t", "name")) %>%
   mutate(Data = ymd(Data),
          stress_stable = recode(stress_stable, '0' = "SV", '1' = "SS"),
-         rel_rank = ifelse(stress_stable == 1, rel_rank, rel_rank *(-1))) %>%
+         rel_rank = ifelse(stress_stable == "SS", rel_rank, rel_rank *(-1))) %>%
   group_by(Data, size, stress_stable) %>%
   summarise(portfolio_ret = weighted.mean(value, rel_rank, na.rm = TRUE)) %>%
   mutate(class = paste(size, "_", stress_stable, sep = "")) %>%
+  ungroup()
+
+
+avrg_sample_rets <- filter(df, Data >= backtest_t0) %>%
+  mutate_at(vars(-Data), ret) %>%
+  pivot_longer(cols = -Data) %>%
+  group_by(Data) %>%
+  summarise(sample_ret = mean(value, na.rm = TRUE)) %>%
   ungroup()
 
 drop_na(portfolio_SSbigsmall) %>%
@@ -169,28 +227,97 @@ drop_na(portfolio_SSbigsmall) %>%
   summarise(cum_ret = cumprod(portfolio_ret + 1), Data) %>%
   ungroup() %>%
   pivot_wider(names_from = class, values_from = cum_ret) %>%
+  merge(mutate(avrg_sample_rets, sample_ret = cum_prod(sample_ret)), by  = "Data") %>%
   merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
   mutate(wig = cumprod(1 + ifelse(is.na(ret(wig)), 0, ret(wig)))) %>%
   merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
   mutate(swig = cumprod(1 + ifelse(is.na(ret(swig)), 0, ret(swig)))) %>%
+  rename("Big SS" = big_SS,
+         "Big SV" = big_SV,
+         "Small SS" = small_SS,
+         "Small SV" = small_SV,
+         "Sample" = sample_ret,
+         "WIG" = wig,
+         "sWIG80" = swig) %>%
   pivot_longer(cols = -Data) %>%
+  mutate(name = fct_reorder(name, value, function(x){-tail(x, n = 1)})) %>%
 ggplot() +
-  geom_line(aes(x = Data, y = value, color = name), size = 1) 
+  geom_line(aes(x = Data, y = value, color = name)) +
+  scale_x_date(date_breaks = "2 year", date_labels = "%Y") +
+  scale_y_continuous(labels = scales::percent, n.breaks = 6) +
+  labs(title = "Return based quality factor on Warsaw Stock Exchange",
+       subtitle = "Stress stable (SS) and Stress vulnerable (SV) portfolios with benchmarks",
+       x = "", y = "Cumulative return") +
+  theme_ipsum() +
+  theme(legend.title = element_blank())
+
+
 
 drop_na(portfolio_SSbigsmall) %>%
   select(Data, class, portfolio_ret) %>%
   pivot_wider(names_from = class, values_from = portfolio_ret) %>%
   merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
   merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
+  merge(avrg_sample_rets, by  = "Data") %>%
   mutate_at(vars(wig, swig), ret) %>%
   drop_na() %>%
   pivot_longer(cols = -Data) %>%
   group_by(name) %>%
-  summarise(sharpe = mean(value, na.rm = TRUE)/sd(value, na.rm = TRUE),
-            ret = prod(value + 1, na.rm = TRUE),
-            vol = sqrt(252) * sd(value, na.rm = TRUE),
-            maxdd = tseries::maxdrawdown(cumprod(value + 1))$maxdrawdown) %>%
-  arrange(desc(sharpe))
+  summarise('Sharpe ratio' = sqrt(252) *( mean(value, na.rm = TRUE)/sd(value, na.rm = TRUE)),
+            'Cumulative return' = prod(value + 1, na.rm = TRUE),
+            'Annualized return' = prod(value + 1, na.rm = TRUE) ^ (1/8),
+            'Annualized volatility' = sqrt(252) * sd(value, na.rm = TRUE),
+            max_dd = max_dd(value)) %>%
+  arrange(desc(`Sharpe ratio`))
+
+## performance viz ###########
+
+filter(portfolio_SSbigsmall, class == "big_SS") %>%
+  left_join(avrg_sample_rets, by = "Data") %>%
+  mutate(portfolio_ret = portfolio_ret - sample_ret) %>% # tutaj zmien jesli nie chcesz excess
+  mutate(day_of_year = yday(Data),
+         year_t = year(Data),
+         portfolio_ret = replace(portfolio_ret, is.na(portfolio_ret), 0)) %>%
+  filter(day_of_year >= yday(Sys.Date())) %>%  # tutaj zmien dzien od ktorego startowac
+  group_by(year_t) %>%
+  mutate(cum_ret = cumprod(portfolio_ret + 1),
+         positive_ret = tail(cum_ret, n = 1) > 1) %>%
+  ungroup() %>%
+  ggplot(aes(y = cum_ret - 1, x = day_of_year, color = as.factor(year_t))) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  scale_y_percent(n.breaks = 10)
+
+filter(portfolio_SSbigsmall, class == "big_SS") %>%
+  mutate(day_of_year = yday(Data),
+         year_t = year(Data),
+         portfolio_ret = replace(portfolio_ret, is.na(portfolio_ret), 0)) %>%
+  filter(day_of_year >= yday(Sys.Date())) %>%
+  group_by(year_t) %>%
+  mutate(cum_ret = cumprod(portfolio_ret + 1),
+         positive_ret = tail(cum_ret, n = 1) > 1) %>%
+  ungroup() %>%
+  ggplot(aes(y = cum_ret - 1, x = day_of_year)) +
+  geom_line() +
+  facet_wrap(~ year_t) +
+  geom_hline(yintercept = 0, linetype = 2)
+
+
+filter(portfolio_SSbigsmall, class == "big_SS") %>%
+  mutate(day_of_year = yday(Data),
+         year_t = year(Data),
+         portfolio_ret = replace(portfolio_ret, is.na(portfolio_ret), 0)) %>%
+  filter(day_of_year >= yday(Sys.Date())) %>%
+  group_by(year_t) %>%
+  mutate(cum_ret = cumprod(portfolio_ret + 1),
+         positive_ret = tail(cum_ret, n = 1) > 1) %>%
+  ungroup() %>%
+  group_by(day_of_year) %>%
+  summarise(ret = mean(portfolio_ret, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(cum_ret = cumprod(ret + 1)) %>%
+  ggplot(aes(x = day_of_year, y = cum_ret)) +
+  geom_line()
 
 # No size control ##############
 

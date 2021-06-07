@@ -15,87 +15,55 @@ output:
     code_folding: show
 ---
 
-Recently I ran across an interesting paper published as a working paper of National Bureau of Economic Research called "Return Based Measue of Firm Quality" (you may read it [here](https://www.nber.org/papers/w27859)). Apparently, I had a suitable data and thought why not reproduce it on polish data in the free time. It turned out not so bad and thanks to being not filled with boring mathematic formulae I guess it's also pretty accessible. 
+Recently I ran across an interesting paper published by National Bureau of Economic Research entitled "[Return Based Measue of Firm Quality](https://www.nber.org/papers/w27859)". I happen to have a suitable data and thought why not reproduce it on data from polish stock exchange in the free time. It turned out not so bad and thanks to being not filled with boring mathematical formulae I guess it's also pretty accessible. 
 
-You dont have to read the code. If you are not familiar with R or other programming language you may still read it.
+At the end of the post you may find a reproducible R code, which I (shamlessly) think is written not so bad. 
 
-Basically, the quality factor is a general characteristic of firms that are well governed or e.g. have higher profitability. The difference between this factor and a popular value is that quality is not related to the valuation of a particular company, so it does not take into account market cap in its metrics. This factor was well described and analyzed by Clifford S. Asness, Andrea Frazzini & Lasse Heje Pedersen in their paper [Quality minus Junk](https://link.springer.com/article/10.1007/s11142-018-9470-2). It's a very interesting read.
+Basically, the quality factor, that the authors of the paper analyze, is a general characteristic of firms that are well governed, have higher profitability or e.g have sound strategy. The difference between this factor and a popular value is that quality is not related to the valuation of a particular company, so it does not take into account market cap in its metrics. This factor was well described and analyzed by Clifford S. Asness, Andrea Frazzini & Lasse Heje Pedersen in their paper "[Quality minus Junk](https://link.springer.com/article/10.1007/s11142-018-9470-2)". It's a very interesting read.
 
-The authors of the paper which we'd like to reproduce try to measure the same factor but without relying on the fundamental data. The author came to the quite interesting way to do so. Basic idea is to:
+The authors of the paper which we'd like to reproduce try to measure the same factor but without relying on fundamental data, like gross margin or profit growth. The authors came with pretty interesting and clever way to do so. Basic idea is to:
 
-- Divide stock universum by their sectors and market capitalization.
+- Divide stock universe by their sectors and market capitalization.
 - For each sector identify the worst performing month of a given year (stress time).
-- In the next year form a portfolio of the most stress-stable sotcks during stress time within their market cap.
+- In the next year, form a portfolio of the most stress-stable (best performance) stocks during stress time within their market cap and sector.
 
-First we have to define some functions, load libraries and import necessary data, which i store on my github. 
 
-```{r, warning=FALSE, message=FALSE}
+So, with the strategy above, we would like to find the stocks that are doing relatively good in hard times, according to the popular saying of Warren Buffet: *A rising tide lifts all boats. Only when the tide goes out do you discover who has been swimming naked*.
+
+The data I gathered contains information on 171 (approx. 40% of listed) randomly sampled stocks from Warsaw Stock Exchange (WSE hereinafter), equally divided into 9 sectors. For each stock we have its market capitalization, prices and industry in which they operate. Number of sectors, as well stocks included should be high enough, so that there would be no stock-specific moves seen on the sector benchmarks. Performance of equally-weighted portfolios of these stocks looks as below:
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=11, fig.height=6}
+
+# setup #########
 library(tidyverse)
+library(TTR)
 library(magrittr)
 library(purrr)
 library(lubridate)
+library(ggplot2)
 library(vroom)
+library(hrbrthemes)
 
-# useful functions
 ret <- function(x) (x - lag(x))/ lag(x)
 cum_prod <-  function(x) cumprod(replace(x, is.na(x), 0) + 1)
+max_dd <- function(r){ max(1 - cumprod(1 + r) / cummax(cumprod(1 + r)))}
+  
+data_folder <- "data"
 
-# importing data (btw there is a huge difference betwen read.csv() and vroom())
-every_df    <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/every_df.csv")[,-1]
-ticker_list <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/ticker_sectors.csv")[,-1]
-df          <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/sample_df_rets.csv")[,-1]
-df_mc       <- vroom( "https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/df_mc.csv")[,-1]
-benchmark   <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/benchmark.csv")[,-1] %>% mutate(Data = as.Date(Data))
-swig        <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/swig.csv")[,-1] %>% mutate(Data = as.Date(Data))
-```
+# importing data
+every_df       <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/every_df.csv")[,-1]
+invest_tickers <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/ticker_sectors.csv")[,-1]
+df             <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/sample_df_rets.csv")[,-1]
+df_mc          <- vroom( "https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/df_mc.csv")[,-1]
+benchmark      <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/benchmark.csv")[,-1] %>% mutate(Data = as.Date(Data))
+swig           <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/swig.csv")[,-1] %>% mutate(Data = as.Date(Data))
 
 
-We have data only on 171 tickers, but Sectors available are quite narrow, we have to gather them into only 9, so each sector will have enough stocks for a meaningful analysis. I made these sectors with a thumb-rule but don't worry i was not really doing any data mining here.
 
-```{r}
-agg_sectors <- list(chem_materials = c("Chemia", "Drewno i papier", "Górnictwo", "Tworzywa i guma", "Hutnictwo", "Recykling"),
-                    consumer_goods = c("Inne dobra konsumpcyjne", "Produkcja żywności", "Motoryzacja", "Odzież i kosmetyki", "Wyposażenie domu"),
-                    finance = c("Banki", "Finanse pozostałe", "Rynek kapitałowy", "Ubezpieczenia"),
-                    trade_services = c("Handel hurtowy", "Handel internetowy", "Media", "Pozostały handel i usługi", "Rekreacja i wypoczynek", "Sieci handlowe"),
-                    healthcare = c("Ochrona zdrowia", "Biotechnologia"),
-                    energy = c("Paliwa", "Energia", "Dystrybucja ciepła i wody"),
-                    industrials = c("Elektromaszynowy", "Transport", "Usługi dla przedsiębiorstw", "Zaopatrzenie przedsiębiorstw"),
-                    construction = c("Budownictwo", "Nieruchomości"),
-                    tech = c("Gry video", "Informatyka", "Telekomunikacja", "Nowe technologie"))%>%
-                unlist()%>%
-                as.data.frame() %>%
-                data.frame(sector = gsub('[[:digit:]]+', '',row.names(.)))
-```
+invest_tickers <- select(invest_tickers, "name" = ticker, "sector" = agg_sector) %>%
+                    mutate(name = tolower(name))
 
-Now that we have the sectors we need to find what is the minimal amount of stocks in a single sector and choose that many random tickers for each of the group.
-
-```{r}
-
-# what is the minimal number of stocks in a single group?
-n_sample <- ticker_list %>%
-  filter(stock_name %in% colnames(every_df)) %>%
-  select(agg_sector) %>%
-  table() %>%
-  as.data.frame() %>%
-  arrange(desc(".")) %>%
-  .$Freq %>%
-  min()
-
-invest_tickers <- group_by(ticker_list, agg_sector) %>%
-  arrange(desc(`.`)) %>%
-  mutate(nth_ticker = 1:n()) %>%
-  ungroup() %>%
-  drop_na() %>%
-  filter(nth_ticker <= n_sample) %>%
-  select(ticker, "sector" = agg_sector) %>%
-  mutate(ticker = tolower(ticker))
-
-```
-
-So the sector with the least number of stocks is energy (unsurprisingly), thus we will randomly choose 19 tickers for each of the sector, so that each will have the same amount.
-
-Next we have to make a sector index returns. For a simplicity each sector index will be an equal weights $1/N$ style portfolio. 
-```{r, message=FALSE}
+# data wrangling for backtest ##################
 
 backtest_t0 <- "2007-01-01"
 
@@ -103,25 +71,42 @@ backtest_t0 <- "2007-01-01"
 sector_rets <- filter(df, Data >= backtest_t0) %>%
                 mutate_at(vars(-Data), ret) %>%
                 pivot_longer(cols = -Data) %>%
-                merge(.,rename(invest_tickers, "name" = ticker), by = "name") %>%
+                merge(., invest_tickers, by = "name") %>%
                 group_by(Data, sector) %>%
                 summarise(avg_ret = mean(value, na.rm = TRUE)) %>%
                 ungroup() %>%
                 pivot_wider(names_from = sector, values_from = avg_ret) 
 
-
-
 mutate_at(sector_rets, vars(-Data), cum_prod) %>%
 pivot_longer(cols = -Data) %>%
-mutate(Data = ymd(Data)) %>%
+mutate(Data = ymd(Data),
+       name = recode(name,
+                       chem_materials = "Chemicals & Basic materials",
+                       construction = "Construction",
+                       consumer_goods = "Consumer goods",
+                       energy = "Energy",
+                       finance = "Finance",
+                       healthcare = "Healthcare",
+                       industrials = "Manufacturing",
+                       tech = "Technology",
+                       trade_services = "Trade & Services")) %>%
 ggplot(aes(x = Data)) +
-  geom_line(aes(y = value, color = name))
-
+  geom_line(aes(y = value, color = name)) +
+  labs(title = "Equally-weighted portfolios of analyzed sectors",
+       x = "", y = "Cumulative return") +
+  scale_y_continuous(labels = function(x){scales::percent(x - 1)}, n.breaks = 5) +
+  scale_x_date(date_breaks = "2 year", date_labels = "%Y") +
+  theme_ipsum() +
+  theme(legend.title = element_blank()) 
+  
+  
 ```
 
+Except from the healthcare during coronavirus crisis and trade and services in 2015:2017, most of the sectors have stable long term returns, which seems that there is, fortunately, not that much stock-specific moves that drives particular indexes.
 
+Now with sector-wide returns we will identify stressful times, which are the worst performance months each year for each sector. The heatmap below shows performance of each sector and highlighted stressful period.
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
 
 # stressful times in every year per sector
 stressful_time <- mutate(sector_rets) %>%
@@ -145,17 +130,85 @@ stress_stock_rets <- filter(df, Data >= backtest_t0) %>%
                       mutate(Data = floor_date(as_date(Data), "month")) %>%
                       group_by(name, Data) %>%
                       summarise(stock_month_ret = prod(value + 1, na.rm = TRUE)) %>%
-                      merge(rename(invest_tickers, "name" = ticker), by = "name", all = TRUE) %>%
+                      merge(invest_tickers, by = "name", all = TRUE) %>%
                       mutate(year_t = year(Data)) %>%
                       merge(select(stressful_time,"sector" = name, worst_month, year_t), 
                             by = c("sector", "year_t"), all.y = TRUE) %>%
                       group_by(name, year_t) %>%
                       summarise(stress_ret = stock_month_ret[which(month(Data) == worst_month)]) %>%
                       ungroup() %>%
-                      merge(rename(invest_tickers, "name" = ticker), by = "name", all = TRUE) %>%
+                      merge(invest_tickers, by = "name", all = TRUE) %>%
                       merge(select(stressful_time,"sector" = name, worst_month, year_t), 
                             by = c("sector", "year_t"), all.y = TRUE)
 
+filter(sector_rets[-1,], year(Data) != 2021) %>%
+pivot_longer(cols = -Data) %>%
+  mutate(month_t = month(Data),
+         year_t = year(Data)) %>%
+  group_by(month_t, year_t, name) %>%
+  summarise(ret = prod(value + 1)) %>%
+  ungroup() %>%
+  mutate(ret = ifelse(is.na(ret), 1, ret)) %>%
+  left_join(rename(stressful_time, "month_t" = worst_month),
+            by = c("month_t", "year_t", "name")) %>%
+  mutate(which_month = month(which_month),
+         name = recode(name,
+                       chem_materials = "Chemicals & Basic materials",
+                       construction = "Construction",
+                       consumer_goods = "Consumer goods",
+                       energy = "Energy",
+                       finance = "Finance",
+                       healthcare = "Healthcare",
+                       industrials = "Manufacturing",
+                       tech = "Technology",
+                       trade_services = "Trade & Services"),
+         ret = ret - 1) %>%
+  rename("Return" = ret) %>%
+  ggplot(aes(x = month_t, y = year_t, fill = Return)) +
+  geom_tile() +
+  geom_rect(aes(xmin = which_month - 0.5, 
+                xmax = which_month + 0.5, 
+                ymin = year_t - 0.5, 
+                ymax = year_t + 0.5), size=1, fill=NA, colour="black") +
+  facet_wrap(~name) +
+  scale_x_continuous(breaks = seq(2,12,2), labels = function(x){month.abb[x]}) +
+  scale_y_continuous(breaks = seq(2008, 2020, 3)) +
+  labs(title = "Monthly returns and stressful times of each sector",
+       x = "month", y = "year") +
+  theme_minimal() +
+  theme(strip.background = element_rect(colour="white")) +
+  scale_fill_viridis_c(option = "B",labels = scales::percent)
+
+```
+
+As one may see, the stressful times are often correlated during times of crisis (Look for example on October 2008), which is unsurprising given that most assets are more correlated during periods of higher volatility. But otherwise there is a significant amount of heterogeneity among sectors. That is why it is important to differentiate between those sectors, when looking at the quality stocks. 
+
+Another important variable that we should control is market capitalization. As common sense would suggest, there is a negative relation between market capitalization and volatility of underlying stock. We may try to confirm this relation on our sample of stocks. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width = 7, fig.align='center'}
+
+pivot_longer(df_mc, cols = -Data) %>%
+  rename("ret" = value) %>%
+  mutate(name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+  full_join(pivot_longer(df, cols = -Data), by  = c("name", "Data")) %>%
+  filter(year(Data) >= 2010) %>%
+  group_by(name) %>%
+  mutate(ret = ROC(ret, type = "discrete")) %>%
+  summarise(median_mc = median(value, na.rm = TRUE),
+            std_dev = sd(ret, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(std_dev < 0.4, 
+         median_mc < 4000) %>%
+  ggplot(aes(x = median_mc, y = std_dev)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10(labels = scales::percent) + 
+  geom_smooth(method = "lm") +
+  labs(title = "Why controlling for market capitalization matters?", 
+       subtitle = "The bigger market cap, the lower volatility. Scale in log10.",
+       x = "Market capitalization (mln PLN)",
+       y = "\u03C3 of returns") +
+  theme_minimal()
 
 # size data frame
 mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
@@ -166,11 +219,370 @@ mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
   summarise(mean_cap = mean(value, na.rm = TRUE)) %>%
   ungroup() %>%
   rename("ticker" = name) %>%
-  merge(invest_tickers, by = "ticker") %>%
+  merge(rename(invest_tickers, "ticker" = name), by = "ticker") %>%
   group_by(y, sector) %>%
   summarise(median_sector_cap = median(mean_cap, na.rm = TRUE), ticker, mean_cap) %>%
   ungroup() %>%
   mutate(size = ifelse(mean_cap > median_sector_cap, "big", "small"))
 
+```
 
+Unsurprisingly, our data also exhibits this (significant) relationship. In our sample, an increase of market cap by 1% should lower standard deviation by 0.13%. 
+
+That's why we will divide stocks also by their market cap. For each sector we have 19 stocks, so we can only afford to make two market cap brackets. We will split them by median of the sector market cap. If we would not divide by market capitalization, as previous chart shows, smaller market cap stocks would be less often identified as stress-stable, even though, in theory quality should be characterized by smaller company as well. 
+
+Now, with prepared data, we can form portfolios. At this stage there are various rules of doing it and backtest strategy over and over, which may effectively lead to selection bias under multiple strategies. This is a well described phenomena by Marcos Lopez de Prado (e.g in his AiML [book](https://www.amazon.com/Advances-Financial-Machine-Learning-Marcos/dp/1119482089)). Thus, the portfolios will be choosen based on the straightforward and popular heuristic. We will weight positions according to their rank of performance during stressful time. For stressful vulnerable stocks the same rule apply inversely (the worse performance, the higher weight).
+
+Our strategy will give us 4 portfolios. Big and small market cap of stressfull-stable (SS) and stressfull-vulnerable (SV, worst performing during stressful time). These portfolos as well as some benchmarks are plotted below.
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height = 6}
+
+stress_ranks <- rename(mean_mc, "year_t" = y, "name" = ticker) %>%
+                  merge(stress_stock_rets, by  = c("name", "year_t", "sector")) %>%
+                  group_by(year_t, sector, size) %>%
+                  summarise(rank = rank(stress_ret, na.last = NA),
+                              n_stocks = sum(!is.na(size)),name, stress_ret) %>%
+                  ungroup() %>%
+                  mutate(rel_rank = rank/n_stocks,
+                         stress_stable = ifelse(rel_rank > 0.5, 1,0),
+                         year_t = year_t - 1) 
+  
+portfolio_SSbigsmall <- filter(df, Data >= backtest_t0) %>%
+  mutate_at(vars(-Data), ret) %>%
+  pivot_longer(cols = -Data) %>%
+  mutate(year_t = year(ymd(Data))) %>%
+  merge(select(stress_ranks, year_t, stress_stable, name, size, rel_rank),
+        by  = c("year_t", "name")) %>%
+  mutate(Data = ymd(Data),
+         stress_stable = recode(stress_stable, '0' = "SV", '1' = "SS"),
+         rel_rank = ifelse(stress_stable == 1, rel_rank, 1 - rel_rank)) %>%
+  group_by(Data, size, stress_stable) %>%
+  summarise(portfolio_ret = weighted.mean(value, rel_rank, na.rm = TRUE)) %>%
+  mutate(class = paste(size, "_", stress_stable, sep = "")) %>%
+  ungroup()
+
+avrg_sample_rets <- filter(df, Data >= backtest_t0) %>%
+  mutate_at(vars(-Data), ret) %>%
+  pivot_longer(cols = -Data) %>%
+  group_by(Data) %>%
+  summarise(sample_ret = mean(value, na.rm = TRUE)) %>%
+  ungroup()
+
+drop_na(portfolio_SSbigsmall) %>%
+  group_by(class) %>%
+  summarise(cum_ret = cumprod(portfolio_ret + 1), Data) %>%
+  ungroup() %>%
+  pivot_wider(names_from = class, values_from = cum_ret) %>%
+  merge(mutate(avrg_sample_rets, sample_ret = cum_prod(sample_ret)), by  = "Data") %>%
+  merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
+  mutate(wig = cumprod(1 + ifelse(is.na(ret(wig)), 0, ret(wig)))) %>%
+  merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
+  mutate(swig = cumprod(1 + ifelse(is.na(ret(swig)), 0, ret(swig)))) %>%
+  rename("Big SS" = big_SS,
+         "Big SV" = big_SV,
+         "Small SS" = small_SS,
+         "Small SV" = small_SV,
+         "Sample" = sample_ret,
+         "WIG" = wig,
+         "sWIG80" = swig) %>%
+  pivot_longer(cols = -Data) %>%
+  mutate(name = fct_reorder(name, value, function(x){-tail(x, n = 1)})) %>%
+ggplot() +
+  geom_line(aes(x = Data, y = value, color = name)) +
+  scale_x_date(date_breaks = "2 year", date_labels = "%Y") +
+  scale_y_comma(labels = scales::percent, n.breaks = 6) +
+  labs(title = "Return based quality factor on Warsaw Stock Exchange",
+       subtitle = "Stress stable (SS) and Stress vulnerable (SV) portfolios with benchmarks",
+       x = "", y = "Cumulative return") +
+  theme_ipsum() +
+  theme(legend.title = element_blank())
+
+```
+
+There are 3 additional benchamrks plotted. WIG is a main polish stock index aggregating every stock listed on WSE (comparable to the Wilshire 5000 but popular like S&P500). sWIG80, is an index of 80 small companies on WSE (comparable to the S&P SmallCap 600 Index). Portfolio called "Sample" is equally-weighted portfolio of every stock that we had in our available sample. As we may see by the sample return, compared with WIG and sWIG80, our sample was kind of biased, in a sense that stocks we sampled were most often better than random. But in general, it does not matter that much, since we will compare our strategy with "Sample" benchmark. 
+
+First expression about quality factor is very good. Not only stress-stable stocks outperformed general sample and stress-vulnerable stocks but also the order of performance is in line with our priors. Small SS stocks outperformed big ones, which is consistent with well described [size anomaly](https://www.sciencedirect.com/science/article/abs/pii/0304405X81900180). On the other hand, portfolios that were meant to underperform, i.e. stress-vulnerable, had worse performance than overall sample of our stock universe. Everything seems to be working how it's supposed to. The only issue is a significant difference between WSE indexes and strategies, which, at least partly, may be explained by [survivorship bias](https://www.investopedia.com/terms/s/survivorshipbias.asp) of our sample.
+
+We may now take a look at some performance metrics of the strategies. 
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+drop_na(portfolio_SSbigsmall) %>%
+  select(Data, class, portfolio_ret) %>%
+  pivot_wider(names_from = class, values_from = portfolio_ret) %>%
+  merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
+  merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
+  merge(avrg_sample_rets, by  = "Data") %>%
+  mutate_at(vars(wig, swig), ret) %>%
+  drop_na() %>%
+  pivot_longer(cols = -Data) %>%
+  group_by(name) %>%
+  summarise('Sharpe ratio' = sqrt(252) *( mean(value, na.rm = TRUE)/sd(value, na.rm = TRUE)),
+            'Cumulative return' = prod(value + 1, na.rm = TRUE) - 1,
+            'Annualized return' = prod(value + 1, na.rm = TRUE) ^ (1/8) - 1,
+            'Annualized volatility' = sqrt(252) * sd(value, na.rm = TRUE),
+            `max drawdown` = max_dd(value)) %>%
+  arrange(desc(`Sharpe ratio`)) %>%
+  kableExtra::kbl(digits = 3) %>%
+  kableExtra::kable_styling()
+```
+
+Sharpe ratio (performance relative to risk) is also quite good and what is more important is that stress stable portfolios have better sharpe ratio than sample, whereas stress-vulnerable lower. The strategy apparently works, even to the extent that stress-stable portfolio have lower volatility with higher total return, compared to the same market cap stress-vulnerable. We could also try making market neutral portfolio shorting stress-vulnerable but there could be technical issues shorting stocks on WSE.
+
+There are also some quite appealing, technical features of this strategy, in particular, there is only one rebalancing during a year (although, i have not tried doing it more frequently) and one does not need complex instruments to apply it. Perhaps this is why the strategy is not  On the other side, we analyzed strategy that held on average 40 stocks, which is quite high amount. Of course, the strategy should also perform good when we lower this number. Still, we could test and validate this strategy for indefinitely long time.
+
+Another conclusion that i got is that, it's good to read most recent papers from top journals. Alpha's of strategies come and go, so it's necessary to be up to date with financial research.
+
+Feel free to contact me in case of any questions or feedback  :)
+
+mateuszdadej@gmail.com or [twitter](https://twitter.com/mateusz_dadej)
+
+```{r, eval=FALSE}
+# setup #########
+library(tidyverse)
+library(TTR)
+library(magrittr)
+library(purrr)
+library(lubridate)
+library(ggplot2)
+library(vroom)
+library(hrbrthemes)
+
+
+ret      <-  function(x) (x - lag(x))/ lag(x)                                # return function
+cum_prod <-  function(x) cumprod(replace(x, is.na(x), 0) + 1)                # cumulative return function
+max_dd   <-  function(r){ max(1 - cumprod(1 + r) / cummax(cumprod(1 + r))) } # max drawdown function
+
+# importing data
+every_df       <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/every_df.csv")[,-1]
+invest_tickers <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/ticker_sectors.csv")[,-1]
+df             <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/sample_df_rets.csv")[,-1]
+df_mc          <- vroom( "https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/df_mc.csv")[,-1]
+benchmark      <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/benchmark.csv")[,-1] %>% mutate(Data = as.Date(Data))
+swig           <- vroom("https://raw.githubusercontent.com/m-dadej/quality_factor_WSE/main/data/swig.csv")[,-1] %>% mutate(Data = as.Date(Data))
+
+invest_tickers <- select(invest_tickers, "name" = ticker, "sector" = agg_sector) %>%
+                    mutate(name = tolower(name))
+
+# data wrangling for backtest ##################
+
+backtest_t0 <- "2007-01-01"
+
+# sector daily returns
+sector_rets <- filter(df, Data >= backtest_t0) %>%
+                mutate_at(vars(-Data), ret) %>%
+                pivot_longer(cols = -Data) %>%
+                merge(., invest_tickers, by = "name") %>%
+                group_by(Data, sector) %>%
+                summarise(avg_ret = mean(value, na.rm = TRUE)) %>%
+                ungroup() %>%
+                pivot_wider(names_from = sector, values_from = avg_ret) 
+
+mutate_at(sector_rets, vars(-Data), cum_prod) %>%
+pivot_longer(cols = -Data) %>%
+mutate(Data = ymd(Data)) %>%
+ggplot(aes(x = Data)) +
+  geom_line(aes(y = value, color = name))
+
+# stressful times in every year per sector
+stressful_time <- mutate(sector_rets) %>%
+                    mutate(Data = floor_date(as_date(Data), "month")) %>%
+                    pivot_longer(cols = -c(Data)) %>%
+                    group_by(Data,  name) %>%
+                    summarise(month_ret = prod(value + 1, na.rm = TRUE)) %>%
+                    ungroup() %>%
+                    mutate(year_t = year(Data)) %>%
+                    group_by(name, year_t) %>%
+                    summarise(worst_month = min(month_ret, na.rm = TRUE),
+                              which_month = Data[which(month_ret == min(month_ret, na.rm = TRUE))]) %>%
+                    ungroup() %>%
+                    mutate(worst_month = month(which_month))
+
+# return of a given stock during stressful time
+stress_stock_rets <- filter(df, Data >= backtest_t0) %>%
+                      mutate_at(vars(-Data), ret) %>%
+                      pivot_longer(cols = -Data) %>%
+                      mutate(Data = floor_date(as_date(Data), "month")) %>%
+                      group_by(name, Data) %>%
+                      summarise(stock_month_ret = prod(value + 1, na.rm = TRUE)) %>%
+                      merge(invest_tickers, by = "name", all = TRUE) %>%
+                      mutate(year_t = year(Data)) %>%
+                      merge(select(stressful_time,"sector" = name, worst_month, year_t), 
+                            by = c("sector", "year_t"), all.y = TRUE) %>%
+                      group_by(name, year_t) %>%
+                      summarise(stress_ret = stock_month_ret[which(month(Data) == worst_month)]) %>%
+                      ungroup() %>%
+                      merge(invest_tickers, by = "name", all = TRUE) %>%
+                      merge(select(stressful_time,"sector" = name, worst_month, year_t), 
+                            by = c("sector", "year_t"), all.y = TRUE)
+
+# sector returns heatmap
+
+sector_heatmap <- filter(sector_rets[-1,], year(Data) != 2021) %>%
+                  pivot_longer(cols = -Data) %>%
+                  mutate(month_t = month(Data),
+                         year_t = year(Data)) %>%
+                  group_by(month_t, year_t, name) %>%
+                  summarise(ret = prod(value + 1)) %>%
+                  ungroup() %>%
+                  mutate(ret = ifelse(is.na(ret), 1, ret)) %>%
+                  left_join(rename(stressful_time, "month_t" = worst_month),
+                            by = c("month_t", "year_t", "name")) %>%
+                  mutate(which_month = month(which_month),
+                         name = recode(name,
+                                       chem_materials = "Chemicals & Basic materials",
+                                       construction = "Construction",
+                                       consumer_goods = "Consumer goods",
+                                       energy = "Energy",
+                                       finance = "Finance",
+                                       healthcare = "Healthcare",
+                                       industrials = "Manufacturing",
+                                       tech = "Technology",
+                                       trade_services = "Trade & Services"),
+                         ret = ret - 1) %>%
+                  rename("Return" = ret) %>%
+                  ggplot(aes(x = month_t, y = year_t, fill = Return)) +
+                  geom_tile() +
+                  geom_rect(aes(xmin = which_month - 0.5, 
+                                xmax = which_month + 0.5, 
+                                ymin = year_t - 0.5, 
+                                ymax = year_t + 0.5), size=1, fill=NA, colour="black") +
+                  facet_wrap(~name) +
+                  scale_x_continuous(breaks = seq(2,12,2), labels = function(x){month.abb[x]}) +
+                  scale_y_continuous(breaks = seq(2008, 2020, 2)) +
+                  labs(title = "Monthly returns and stressful times of each sector",
+                       x = "month", y = "year") +
+                  theme_minimal() +
+                  theme(strip.background = element_rect(colour="white")) +
+                  scale_fill_viridis_c(option = "B",labels = scales::percent)
+
+# market cap vs. standard deviation scatterplot
+
+mc_sd_plot <- pivot_longer(df_mc, cols = -Data) %>%
+              rename("ret" = value) %>%
+              mutate(name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+              full_join(pivot_longer(df, cols = -Data), by  = c("name", "Data")) %>%
+              filter(year(Data) >= 2010) %>%
+              group_by(name) %>%
+              mutate(ret = ROC(ret, type = "discrete")) %>%
+              summarise(median_mc = median(value, na.rm = TRUE),
+                        std_dev = sd(ret, na.rm = TRUE)) %>%
+              ungroup() %>%
+              filter(std_dev < 0.4, 
+                     median_mc < 4000) %>%
+              ggplot(aes(x = median_mc, y = std_dev)) +
+              geom_point() +
+              scale_x_log10() +
+              scale_y_log10() + 
+              geom_smooth(method = "lm")
+
+# model from above
+
+market_cap_sd_model <- pivot_longer(df_mc, cols = -Data) %>%
+                        rename("ret" = value) %>%
+                        mutate(name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+                        full_join(pivot_longer(df, cols = -Data), by  = c("name", "Data")) %>%
+                        filter(year(Data) >= 2010) %>%
+                        group_by(name) %>%
+                        mutate(ret = ROC(ret, type = "discrete")) %>%
+                        summarise(median_mc = median(value, na.rm = TRUE),
+                                  std_dev = sd(ret, na.rm = TRUE)) %>%
+                        ungroup() %>%
+                        lm(log10(std_dev) ~ log10(median_mc), data = .) %>%
+                        summary()
+
+# size data frame
+
+mean_mc <- pivot_longer(df_mc, cols = -Data) %>%
+            filter(ymd(Data) < tail(df$Data, n = 1)) %>%
+            mutate(y = year(ymd(Data)),
+                   name = str_split_fixed(name, "_", n = 3)[,1]) %>%
+            group_by(y, name) %>%
+            summarise(mean_cap = mean(value, na.rm = TRUE)) %>%
+            ungroup() %>%
+            rename("ticker" = name) %>%
+            merge(rename(invest_tickers, "ticker" = name), by = "ticker") %>%
+            group_by(y, sector) %>%
+            summarise(median_sector_cap = median(mean_cap, na.rm = TRUE), ticker, mean_cap) %>%
+            ungroup() %>%
+            mutate(size = ifelse(mean_cap > median_sector_cap, "big", "small"))
+
+## 4 portfolios - SS big/small and SV big/small ###############
+
+stress_ranks <- rename(mean_mc, "year_t" = y, "name" = ticker) %>%
+                  merge(stress_stock_rets, by  = c("name", "year_t", "sector")) %>%
+                  group_by(year_t, sector, size) %>%
+                  summarise(rank = rank(stress_ret, na.last = NA),
+                              n_stocks = sum(!is.na(size)),name, stress_ret) %>%
+                  ungroup() %>%
+                  mutate(rel_rank = rank/n_stocks,
+                         stress_stable = ifelse(rel_rank > 0.5, 1,0),
+                         year_t = year_t - 1) 
+  
+
+portfolio_SSbigsmall <- filter(df, Data >= backtest_t0) %>%
+                          mutate_at(vars(-Data), ret) %>%
+                          pivot_longer(cols = -Data) %>%
+                          mutate(year_t = year(ymd(Data))) %>%
+                          merge(select(stress_ranks, year_t, stress_stable, name, size, rel_rank),
+                                by  = c("year_t", "name")) %>%
+                          mutate(Data = ymd(Data),
+                                 stress_stable = recode(stress_stable, '0' = "SV", '1' = "SS"),
+                                 rel_rank = ifelse(stress_stable == 1, rel_rank, 1 - rel_rank)) %>%
+                          group_by(Data, size, stress_stable) %>%
+                          summarise(portfolio_ret = weighted.mean(value, rel_rank, na.rm = TRUE)) %>%
+                          mutate(class = paste(size, "_", stress_stable, sep = "")) %>%
+                          ungroup()
+
+avrg_sample_rets <- filter(df, Data >= backtest_t0) %>%
+                    mutate_at(vars(-Data), ret) %>%
+                    pivot_longer(cols = -Data) %>%
+                    group_by(Data) %>%
+                    summarise(sample_ret = mean(value, na.rm = TRUE)) %>%
+                    ungroup()
+
+drop_na(portfolio_SSbigsmall) %>%
+  group_by(class) %>%
+  summarise(cum_ret = cumprod(portfolio_ret + 1), Data) %>%
+  ungroup() %>%
+  pivot_wider(names_from = class, values_from = cum_ret) %>%
+  merge(mutate(avrg_sample_rets, sample_ret = cum_prod(sample_ret)), by  = "Data") %>%
+  merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
+  mutate(wig = cumprod(1 + ifelse(is.na(ret(wig)), 0, ret(wig)))) %>%
+  merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
+  mutate(swig = cumprod(1 + ifelse(is.na(ret(swig)), 0, ret(swig)))) %>%
+  rename("Big SS" = big_SS,
+         "Big SV" = big_SV,
+         "Small SS" = small_SS,
+         "Small SV" = small_SV,
+         "Sample" = sample_ret,
+         "WIG" = wig,
+         "sWIG80" = swig) %>%
+  pivot_longer(cols = -Data) %>%
+  mutate(name = fct_reorder(name, value, function(x){-tail(x, n = 1)})) %>%
+  ggplot() +
+    geom_line(aes(x = Data, y = value, color = name)) +
+    scale_x_date(date_breaks = "2 year", date_labels = "%Y") +
+    scale_y_continuous(labels = scales::percent, n.breaks = 6) +
+    labs(title = "Return based quality factor on Warsaw Stock Exchange",
+         subtitle = "Stress stable (SS) and Stress vulnerable (SV) portfolios with benchmarks",
+         x = "", y = "Cumulative return") +
+    theme_ipsum() +
+    theme(legend.title = element_blank())
+
+drop_na(portfolio_SSbigsmall) %>%
+  select(Data, class, portfolio_ret) %>%
+  pivot_wider(names_from = class, values_from = portfolio_ret) %>%
+  merge(select(benchmark, Data, "wig" =  Otwarcie), by = "Data") %>%
+  merge(select(swig, Data, "swig" = Otwarcie), by  = "Data") %>%
+  merge(avrg_sample_rets, by  = "Data") %>%
+  mutate_at(vars(wig, swig), ret) %>%
+  drop_na() %>%
+  pivot_longer(cols = -Data) %>%
+  group_by(name) %>%
+  summarise('Sharpe ratio' = sqrt(252) *( mean(value, na.rm = TRUE)/sd(value, na.rm = TRUE)),
+            'Cumulative return' = prod(value + 1, na.rm = TRUE),
+            'Annualized return' = prod(value + 1, na.rm = TRUE) ^ (1/8),
+            'Annualized volatility' = sqrt(252) * sd(value, na.rm = TRUE),
+            max_dd = max_dd(value)) %>%
+  arrange(desc(`Sharpe ratio`))
 ```
